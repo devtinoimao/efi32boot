@@ -2,6 +2,7 @@
 BOOTX64.EFI
 OVMF32*.fd
 build/
+toolchain/
 
 # Local disk images and generated ESP.
 *.img
@@ -27,3 +28,12 @@ winpe_fix.log
 vars/
 
 vars/
+*.ppm
+/evidence_*.png
+kvm_host_drive.out
+kvm_host_drive.status
+kvm_mon_py.sock
+CONTEXT.md
+bootx32.efi
+theprogram.tar.gz
+kvm_host_*.log

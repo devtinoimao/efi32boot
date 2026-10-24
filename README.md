@@ -74,6 +74,10 @@ qemu-system-x86_64 -cpu qemu64 -m 2048 -smp 2 -nographic \
   -cdrom tiny10.iso
 ```
 
+KVM with the real host CPU model is supported and verified
+(`-accel kvm -cpu host` boots Windows Setup); it requires the OVMF32
+FeatureControl MSR fix described in `docs/KVM_HOST_CPU.md`.
+
 ## Related projects and prior art
 
 This project does not claim that the idea started here. Related prior concepts and
