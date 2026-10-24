@@ -99,7 +99,10 @@ software emulator or a legacy CSM.
 
 A QEMU demonstration of the hosted 32-bit firmware chain:
 
-![efi32boot QEMU demo — hosted 32-bit firmware booting 32-bit Windows media](media/efi32boot_qemu_demo.mp4)
+![efi32boot QEMU demo — hosted 32-bit firmware booting 32-bit Windows media](media/efi32boot_qemu_demo.gif)
+
+The full MP4 (with sound-free smooth motion) is here:
+[`media/efi32boot_qemu_demo.mp4`](media/efi32boot_qemu_demo.mp4).
 
 The video shows the 64-bit UEFI loader, hosted OVMF32 startup, and 32-bit
 Windows media booting in QEMU. It is provided as research evidence, not as a
