@@ -1,0 +1,29 @@
+# Hosted firmware build inputs/artifacts are external and should not be committed.
+BOOTX64.EFI
+OVMF32*.fd
+build/
+
+# Local disk images and generated ESP.
+*.img
+NvVars
+NvVars.nvdummy
+
+# OS and editor noise.
+.DS_Store
+Thumbs.db
+*~
+*.swp
+
+# Generated host test files.
+*.log
+
+# Local test data and personal logs.
+iso_root/
+*.wim
+boot_execution_logs.txt
+PROGRESS.md
+winpe_fix.log
+
+vars/
+
+vars/
