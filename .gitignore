@@ -37,3 +37,6 @@ CONTEXT.md
 bootx32.efi
 theprogram.tar.gz
 kvm_host_*.log
+winpe_shelf/
+winpe_shelf/
+!OVMF32.fd

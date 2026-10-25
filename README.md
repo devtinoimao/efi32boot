@@ -104,9 +104,18 @@ A QEMU demonstration of the hosted 32-bit firmware chain:
 The full MP4 (with sound-free smooth motion) is here:
 [`media/efi32boot_qemu_demo.mp4`](media/efi32boot_qemu_demo.mp4).
 
-The video shows the 64-bit UEFI loader, hosted OVMF32 startup, and 32-bit
-Windows media booting in QEMU. It is provided as research evidence, not as a
-production safety guarantee.
+The video shows the 64-bit UEFI loader, hosted OVMF32 startup, 32-bit Windows
+media (Tiny10) reaching Setup, and the GRUBFM fallback disc. It is provided as
+research evidence, not as a production safety guarantee.
+
+Known limitation seen in the demo: GRUBFM can start under the hosted firmware,
+but booting WIM-based media through it is currently bugged. Tiny10's own boot
+manager is the reliable path.
+
+A prebuilt `OVMF32.fd` (the patched 32-bit firmware image embedded by the
+loader, with the FeatureControl MSR fix and image-protection policy disabled)
+is included in this repository so the loader can be built without rebuilding
+EDK2. Rebuild instructions are in `docs/KVM_HOST_CPU.md`.
 
 
 ## AI-assisted development
