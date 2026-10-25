@@ -26,7 +26,7 @@ Proven so far:
 - `main.c` relocation logic for the embedded 32-bit firmware
 - `tools/gen_ovmf32.py` — extracts EDK2/OVMF constants from a built firmware
   image
-- `OVMF32*.fd` — **not included**; these must be supplied by the user
+- `OVMF32*.fd` - The file that the program loads to execute 32bit code
 - `Makefile` — freestanding UEFI application build
 
 ## Build
