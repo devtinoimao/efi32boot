@@ -81,14 +81,14 @@ jobs:
       - name: TCG boot test (no KVM on runners)
         run: |
           mkdir -p vars
-          cp /usr/share/OVMF/OVMF_VARS.fd vars/OVMF_VARS.fd
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd vars/OVMF_VARS.fd
           # Boot the hosted firmware chain under TCG, wait for the UEFI Shell
           # prompt marker on serial. This proves: outer OVMF -> 64->32
           # transition -> hosted OVMF32 -> shell, with zero exceptions.
           timeout 600 qemu-system-x86_64 \
             -accel tcg -cpu qemu64 -m 2048 -smp 2 -display none \
             -serial file:boot.log \
-            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
             -drive if=pflash,format=raw,file=vars/OVMF_VARS.fd \
             -drive format=raw,file=esp_ci.img || true
           echo "=== boot log tail ==="
