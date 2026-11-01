@@ -1818,6 +1818,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     /* --- 5. hand off ------------------------------------------------------ */
     /* reinitialize COM1 to 115200 8N1 */
+    Print("[UEFI] arming #GD watchdog (efi32boot 64-bit phase)\\r\\n");
+    /* handover page stays intact across the transition ---------------------------------------------------- */
     __asm__ volatile ("outb %0, %1" : : "a"((unsigned char)0x80), "Nd"((unsigned short)0x3FB));
     __asm__ volatile ("outb %0, %1" : : "a"((unsigned char)0x01), "Nd"((unsigned short)0x3F8));
     __asm__ volatile ("outb %0, %1" : : "a"((unsigned char)0x00), "Nd"((unsigned short)0x3F9));
