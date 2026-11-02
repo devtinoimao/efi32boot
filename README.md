@@ -166,3 +166,20 @@ The hosted `OVMF*.fd` assumes QEMU's PCI host bridge (control word 0x80000000
   With CSM enabled the system may boot via legacy BIOS and never reach UEFI at
   all — test with CSM disabled and UEFI-only first. Please attach the serial
   log of the failed run to bug reports.
+
+## Building for VMware / real hardware
+
+The shipped `OVMF32.fd` and `OvmfPkgIa32` assume QEMU (host bridge
+0x8086:*); under VMware the inner AcpiTimerLib rejects host bridge 0x7190
+with `ASSERT`. To target VMware (or other host bridges), apply
+`patches/acpitimer-vmware-0x7190.patch` to edk2-stable and rebuild
+`OvmfPkgIa32`:
+
+    cd edk2-stable
+    patch -p1 < ../efi32boot/patches/acpitimer-vmware-0x7190.patch
+    source edksetup.sh BaseTools
+    build -a IA32 -t GCC5 -p OvmfPkg/OvmfPkgIa32.dsc -D SECURE_BOOT_ENABLE=TRUE
+
+Then copy the resulting `OVMF*.fd` over `efi32boot/OVMF32.fd` and re-run
+`make`. Real hardware with CSM enabled may additionally boot via legacy
+BIOS — test `CSM off` + UEFI-only mode first.

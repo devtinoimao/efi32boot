@@ -1,0 +1,13 @@
+--- a/OvmfPkg/Library/AcpiTimerLib/BaseAcpiTimerLib.c
++++ b/OvmfPkg/Library/AcpiTimerLib/BaseAcpiTimerLib.c
+@@ -41,6 +41,10 @@ AcpiTimerLibConstructor (
+   HostBridgeDevId = PciRead16 (OVMF_HOSTBRIDGE_DID);
+   switch (HostBridgeDevId) {
++    case 0x7190:   /* VMware Intel 440BX host bridge: treat as PIIX4 family */
++      /* fall through */
+     case INTEL_82441_DEVICE_ID:
+       Pmba       = POWER_MGMT_REGISTER_PIIX4 (PIIX4_PMBA);
+--- a/OvmfPkg/Library/AcpiTimerLib/BaseRomAcpiTimerLib.c
++++ b/OvmfPkg/Library/AcpiTimerLib/BaseRomAcpiTimerLib.c
+@@ (SEC and PEI variants: same edit as BaseAcpiTimerLib.c above)
++      Host bridge id 0x7190 accepted as PIIX4 family.
