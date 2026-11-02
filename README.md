@@ -150,3 +150,19 @@ MIT License. See `LICENSE`.
 This repository does not include Windows ISOs, firmware binaries purchased or
 downloaded by the user, or generated disk images. Obtain these separately in
 compliance with their respective licenses.
+
+## Supported environments
+
+Validated: **QEMU TCG and KVM** (i440fx/q35), CPUs `qemu64` and `core2duo`.
+The hosted `OVMF*.fd` assumes QEMU's PCI host bridge (control word 0x80000000
++ PCI ID `0x8086:...`).
+
+- **VMware** reports PCI host bridge `0x8086:0x7190` (Intel 440BX). The hosted
+  firmware's `AcpiTimerLib` rejects it with `Unknown Host Bridge Device ID` →
+  ASSERT in `SecMain`. Use a VMware-aware OVMF build or run under QEMU.
+- **Real hardware (i5-4570 and similar):** not yet exercised. The handoff
+  logs the host-bridge PCI ID at boot (`[UEFI] Host bridge PCI ID = 0x...`)
+  so unsupported controllers fail loudly instead of silently resetting.
+  With CSM enabled the system may boot via legacy BIOS and never reach UEFI at
+  all — test with CSM disabled and UEFI-only first. Please attach the serial
+  log of the failed run to bug reports.
