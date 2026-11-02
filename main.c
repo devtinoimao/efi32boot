@@ -1756,7 +1756,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         }
 
         if (st != EFI_SUCCESS) {
-            st = PrepareHostedFirmware(map, mapSize, descSize, &entry, &fvBase, &stackTop32);
+            /* Detect the host bridge before handoff so the log explains which
+     * platform/environment we're running under (efi32boot validated under QEMU
+     * TCG/KVM; VMware reports 0x8086:0x7190, real hardware varies). */
+    {
+        UINT32 addr = 0x80000000u;
+        UINT32 val;
+        __asm__ volatile("outl %0, %1" : : "a"(addr), "Nd"((UINT16)0x0CF8) : "memory");
+        __asm__ volatile("inl  %1, %0" : "=a"(val) : "Nd"((UINT16)0x0CFC) : "memory");
+        Print("[UEFI] Host bridge PCI ID = 0x%08x (target: QEMU = 0x8086:?; VMware = 0x8086:0x7190)\\r\\n", val);
+    }
+
+    st = PrepareHostedFirmware(map, mapSize, descSize, &entry, &fvBase, &stackTop32);
         }
         if (st == EFI_SUCCESS && fvBase != 0) {
             /* the SEC core expects the firmware volume pointer in EBP */
