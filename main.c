@@ -1819,6 +1819,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
      * been issued, so from here on only the serial port is used.
      */
     gConsoleDead = TRUE;
+    {
+        UINT32 hbaddr = 0x80000000u;
+        UINT32 hbdev;
+        __asm__ volatile("outl %0, %1" : : "a"(hbaddr), "Nd"((UINT16)0x0CF8) : "memory");
+        __asm__ volatile("inl  %1, %0" : "=a"(hbdev) : "Nd"((UINT16)0x0CFC) : "memory");
+        Print("[UEFI] Host bridge PCI ID = 0x%08x (QEMU=0x8086:* ; VMware=0x8086:0x7190)\r\n", hbdev);
+        if (hbdev == 0x80867190u) {
+            UINT32 cfg = 0x80000002u;
+            __asm__ volatile("outl %0, %1" : : "a"(cfg), "Nd"((UINT16)0x0CF8) : "memory");
+            __asm__ volatile("outw %0, %1" : : "a"((UINT16)0x1237), "Nd"((UINT16)0x0CFA) : "memory");
+            Print("[UEFI] VMware host bridge - temp override DID 0x7190 -> 0x1237 for OVMF32 Piix4 path\r\n");
+        }
+    }
     Print("[UEFI] requesting ExitBootServices\r\n");
     gBS->FreePool(map);
     st = ExitBootServices(ImageHandle);
