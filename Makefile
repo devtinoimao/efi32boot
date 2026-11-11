@@ -1,11 +1,14 @@
+# SPDX-License-Identifier: MIT
 # ==========================================================================
-#  Makefile -- 64 bit UEFI bootloader that hands control over to a 32 bit
-#               Windows PE (WinPE x86) image.
+#  Makefile -- 64 bit UEFI bootloader that hosts a 32 bit inner firmware.
+#              The inner firmware boots ANY 32 bit EFI OS; no OS-specific
+#              file is named by the loader or this build.
 #
 #  Targets
 #    all      -> BOOTX64.EFI   (the 64 bit UEFI application)
-#    payload  -> bootx32.efi   (the IA-32 Windows PE test payload)
-#    test     -> build everything and run the QEMU verification script
+#    payload  -> bootx32.efi   (optional standalone IA-32 PE test artifact,
+#                                NOT loaded by BOOTX64.EFI)
+#    test     -> build and run the OS-neutral QEMU smoke test
 #    clean    -> remove the build directory
 #
 #  The cross compiler can be pointed at a private tool chain prefix:
@@ -47,13 +50,17 @@ OVMF32_OBJ      := $(BUILDDIR)/ovmf32_blob.o
 #  -mno-red-zone                         : the firmware may use the stack
 #  -fshort-wchar                         : UEFI uses 16 bit wide characters
 #  -ffunction-sections + --gc-sections    : drop unused code
+# ../shared is the canonical home of platform_quirks.h, shared with efi64boot.
+# A standalone clone carries shared/ itself; the combined workspace also has
+# a sibling ../shared.  Both are searched, self-contained copy first.
+SHARED_INC := -Ishared -I../shared
 CFLAGS  := -m64 -Os -g0 -std=gnu11 \
            -ffreestanding -fno-builtin -fno-stack-protector \
            -fno-asynchronous-unwind-tables -fno-unwind-tables \
            -fno-tree-loop-distribute-patterns \
            -mno-red-zone -fshort-wchar \
            -ffunction-sections -fdata-sections \
-           -I$(BUILDDIR) \
+           -I$(BUILDDIR) $(SHARED_INC) \
            -Wall -Wextra -Wno-unused-parameter
 
 #  --subsystem,10   : EFI application
@@ -67,7 +74,7 @@ LDFLAGS := -nostdlib -nostartfiles -nodefaultlibs \
 NASMFLAGS := -f win64
 
 # --------------------------------------------------------------------------
-#  IA-32 (i386) Windows PE payload
+#  Optional standalone IA-32 PE test artifact (no OS-specific content)
 # --------------------------------------------------------------------------
 CFLAGS32 := -m32 -Os -g0 -std=gnu11 \
             -ffreestanding -fno-builtin -fno-stack-protector \
@@ -106,7 +113,7 @@ $(OVMF32_GEN): tools/gen_ovmf32.py $(OVMF32) | $(BUILDDIR)
 $(OVMF32_OBJ): ovmf32_blob.S $(OVMF32) | $(BUILDDIR)
 	$(CC) -m64 -c -I. -o $@ ovmf32_blob.S
 
-$(BUILDDIR)/main.o: main.c $(OVMF32_GEN) | $(BUILDDIR)
+$(BUILDDIR)/main.o: main.c $(OVMF32_GEN) ../shared/platform_quirks.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILDDIR)/transition.o: transition.asm | $(BUILDDIR)
@@ -117,7 +124,7 @@ $(TARGET): $(BUILDDIR)/main.o $(BUILDDIR)/transition.o $(OVMF32_OBJ)
 	@echo "--- $@ ---"
 	@$(CROSS_COMPILE)objdump -f $@ 2>/dev/null | head -4 || true
 
-# --- IA-32 Windows PE payload --------------------------------------------
+# --- optional standalone IA-32 PE test artifact ----------------------------
 $(BUILDDIR)/payload32.o: payload32.c | $(BUILDDIR)
 	$(CC32) $(CFLAGS32) -c -o $@ $<
 
@@ -129,8 +136,9 @@ $(PAYLOAD): $(BUILDDIR)/payload32.o $(BUILDDIR)/payload32_entry.o
 	    $(BUILDDIR)/payload32.o $(BUILDDIR)/payload32_entry.o
 
 # --- verification ---------------------------------------------------------
-test: all payload
-	./test_winpe32.sh
+# OS-neutral: no WinPE/BCD/BOOT.WIM assets are required or referenced.
+test: all
+	./test_qemu.sh
 
 clean:
 	rm -rf $(BUILDDIR) $(TARGET) $(PAYLOAD)

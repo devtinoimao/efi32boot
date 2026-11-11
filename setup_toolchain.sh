@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
 # ==========================================================================
 #  setup_toolchain.sh -- rootless tool chain bootstrap for this project
 #

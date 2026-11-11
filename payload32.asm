@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: MIT
 ; ==========================================================================
 ;  payload32.asm -- entry stub of the IA-32 (i386) Windows PE test payload
 ;

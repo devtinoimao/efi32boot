@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Generate the build time constants of the embedded 32 bit firmware.
 
 The 32 bit EDK2 firmware (OVMF32) is linked for a fixed flash address, so its

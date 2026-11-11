@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * ovmf32_blob.S -- embeds the 32 bit EDK2 firmware into the 64 bit
  *                   application.

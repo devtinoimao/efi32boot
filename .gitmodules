@@ -1,0 +1,5 @@
+[submodule "edk2"]
+	path = edk2
+	url = https://github.com/devtinoimao/edk2.git
+	branch = hosted-firmware
+	shallow = true

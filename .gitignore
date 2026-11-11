@@ -40,3 +40,6 @@ kvm_host_*.log
 winpe_shelf/
 winpe_shelf/
 !OVMF32.fd
+
+# Real-hardware validation evidence
+!vmware_universal_test.log

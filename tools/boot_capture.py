@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Generic boot capture: run QEMU with a monitor, screendump periodically,
 inject Enter presses around the expected cdboot window.
 Usage: boot_capture.py <accel> <cpu> <esp> <iso> <tag> [grubfm]

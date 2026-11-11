@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
 # ==========================================================================
 #  test_winpe32.sh -- automated Linux verification of BOOTX64.EFI
 #

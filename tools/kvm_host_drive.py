@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Drive one KVM -cpu host Tiny10 run: inject Enter at the cdboot prompt
 and capture screendumps for the whole boot, so we can see exactly what the
 guest displays and when."""

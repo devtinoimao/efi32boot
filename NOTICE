@@ -1,0 +1,35 @@
+Third-party notices for efi32boot
+========================================
+
+Our original source code in this repository (loader C/assembly, build
+scripts, tools under tools/ and shared/) is licensed under the MIT License;
+see LICENSE. Individual source files carry SPDX-License-Identifier tags.
+
+TianoCore EDK2 / OVMF
+---------------------
+The embedded firmware images OVMF32.fd and OVMF64.fd are built from
+TianoCore EDK2, licensed under BSD-2-Clause-Patent. Upstream copyright
+notices and the full license text live in the EDK2 tree (License.txt,
+License-History.txt) and are referenced here rather than copied into a
+vendor directory. The patched fork is pinned as the "edk2" git submodule:
+
+    https://github.com/devtinoimao/edk2  (branch: hosted-firmware)
+
+Rebuilding those firmware images produces derivative works of EDK2; the
+BSD-2-Clause-Patent terms continue to apply to that material. Our MIT terms
+do not relicense EDK2.
+
+Toolchain
+---------
+MinGW-w64, NASM, QEMU, podman, mtools and the EDK2 BaseTools are external
+programs used to build and test this project. They are not distributed here
+and keep their own licenses.
+
+Operating-system media
+----------------------
+No Windows, Linux or BSD installation media, boot managers, WIM/BCD files or
+generated disk images are distributed as part of the source. Any ISO used for
+testing is supplied by the user under its own license. Historical test logs
+and demo media in this repository show such an ISO as a test subject only.
+
+This is experimental firmware. No warranty, no Secure Boot guarantees.

@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * main.c -- 64-bit (x86_64) UEFI bootloader whose sole purpose is to move the
  *            CPU out of 64-bit Long Mode, into 32-bit Protected Mode with
- *            paging disabled, and hand control to a 32-bit Windows PE
- *            (WinPE x86) loader/kernel image.
+ *            paging disabled, and hand control to a hosted 32-bit inner
+ *            firmware, which boots any 32-bit EFI OS.
  *
  * Execution flow
  * --------------
@@ -10,10 +11,9 @@
  *                               ConOut text output, COM1 serial trace).
  *   2.  DumpMemoryMap()       - SystemTable->BootServices->GetMemoryMap() to
  *                               learn the firmware memory topology.
- *   3.  LoadPayload()         - read "\sources\boot.wim" from the ESP through
- *                               the SimpleFileSystem protocol and map it as a
- *                               PE32 image (sections + base relocations) into
- *                               physical memory below the 4 GiB ceiling.
+ *   3.  PrepareHostedFirmware() - copy the embedded 32-bit firmware below
+ *                                4 GiB, rebase its SEC core and reserve the
+ *                                MEMFD region at its build address.
  *   4.  ReserveHandover()     - low (<4 GiB) page for the 32-bit GDT, the
  *                               handover descriptor and a copy of the
  *                               compatibility-mode trampoline, plus a low
@@ -22,7 +22,8 @@
  *                               freshly obtained memory map key.
  *   6.  TransitionTo32BitAndJump(entry) - transition.asm: lgdt(32-bit GDT),
  *                               far return into compatibility mode, CLI/CR0.PG
- *                               teardown, far jump to the PE entry point.
+ *                               teardown, far jump to the inner firmware's
+ *                               32-bit SEC entry point.
  *
  * Freestanding: no CRT, no libc, no gnu-efi runtime.  The only external
  * symbols are the three NASM routines in transition.asm.
@@ -35,6 +36,7 @@
 #include <stdarg.h> /* freestanding, provided by the compiler itself        */
 
 #include "ovmf32_constants.h" /* generated from the embedded 32 bit firmware  */
+#include "platform_quirks.h"  /* canonical copy: ../shared/platform_quirks.h */
 
 /* ------------------------------------------------------------------------- */
 /*  UEFI scalar types (UEFI 2.10 / PI 1.8, x86_64 flavour)                  */
@@ -374,12 +376,8 @@ typedef struct {
 /*  Well known GUIDs                                                         */
 /* ------------------------------------------------------------------------- */
 
-static const EFI_GUID gEfiSimpleFileSystemProtocolGuid = {
-    0x964E5B22, 0x6459, 0x11D2, { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
-};
-static const EFI_GUID gEfiFileInfoGuid = {
-    0x09576E92, 0x6D3F, 0x11D2, { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
-};
+/* No protocol GUIDs are needed: the loader never opens or modifies any file
+ * on the ESP.  The inner firmware owns all file access after hand-off. */
 
 /* ------------------------------------------------------------------------- */
 /*  transition.asm interface                                                 */
@@ -427,6 +425,8 @@ extern const UINT8 TransitionCompatTrampolineEnd[];
 static EFI_SYSTEM_TABLE *gST;
 static EFI_BOOT_SERVICES *gBS;
 static EFI_RUNTIME_SERVICES *gRT;
+/* Detected once in efi_main, before any console is torn down. */
+static pq_platform_info_t gPlatform;
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *gConOut;
 
 /*
@@ -924,372 +924,24 @@ static EFI_STATUS ExitBootServices(EFI_HANDLE ImageHandle)
 }
 
 /* ------------------------------------------------------------------------- */
-/*  ESP file access                                                          */
+/*  No OS-specific payload handling                                          */
 /* ------------------------------------------------------------------------- */
-
-
-static const CHAR16 *const kPayloadCandidates[] = {
-    L"\\sources\\boot.wim",
-    L"\\sources\\winpe32.efi",
-    L"\\sources\\bootx32.bin",
-    L"\\boot.wim",
-    NULL
-};
-
-static UINTN StrLenW(const CHAR16 *s)
-{
-    UINTN n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
 /*
- * Reads one file from the EFI system partition through the SimpleFileSystem
- * protocol.  The returned buffer comes from the boot services pool and stays
- * valid until ExitBootServices() has been called.
+ * This loader does NOT look for any particular OS file.  It hosts a 32-bit
+ * inner firmware and lets that firmware's BDS enumerate boot options and
+ * boot whatever EFI OS is installed (Linux, Windows, BSD, ...).  The old
+ * code probed \sources\boot.wim / winpe32.efi / BCD and mapped a raw PE32
+ * image directly; a raw PE entry point has no EFI boot services, so it could
+ * never boot a general EFI OS.  Removed.
  */
-static EFI_STATUS ReadEspFile(EFI_FILE_PROTOCOL *Root, const CHAR16 *Path,
-                              UINT8 **OutData, UINT64 *OutSize)
-{
-    EFI_BOOT_SERVICES *BS = gBS;
-    EFI_FILE_PROTOCOL *File = NULL;
-    EFI_FILE_INFO *Info = NULL;
-    UINTN infoSize = 0, readSize;
-    UINT8 *buf = NULL;
-    UINT64 total = 0;
-    EFI_STATUS st;
 
-    st = Root->Open(Root, &File, (CHAR16 *)Path, 0x0000000000000001ULL /* EFI_FILE_MODE_READ */, 0);
-    if (st != EFI_SUCCESS) {
-        Print("[FS ] open '%s' failed, status %u\r\n", "(path)", (UINT32)st);
-        return st;
-    }
-
-    st = File->GetInfo(File, (EFI_GUID *)&gEfiFileInfoGuid, &infoSize, NULL);
-    if (st != EFI_SUCCESS || infoSize < sizeof(EFI_FILE_INFO)) {
-        File->Close(File);
-        return EFI_DEVICE_ERROR;
-    }
-
-    Info = (EFI_FILE_INFO *)BS->AllocatePool(EfiBootServicesData, infoSize, (VOID **)&Info);
-    if (Info == NULL) { File->Close(File); return EFI_OUT_OF_RESOURCES; }
-
-    st = File->GetInfo(File, (EFI_GUID *)&gEfiFileInfoGuid, &infoSize, Info);
-    if (st != EFI_SUCCESS) {
-        BS->FreePool(Info);
-        File->Close(File);
-        return st;
-    }
-
-    total = Info->FileSize;
-    BS->FreePool(Info);
-
-    /* the 32 bit PE payload is small; skip everything that is not */
-    if (total > 16 * 1024 * 1024) return EFI_NOT_FOUND;
-
-    if (total == 0) { File->Close(File); return EFI_NOT_FOUND; }
-
-    buf = (UINT8 *)BS->AllocatePool(EfiBootServicesData, (UINTN)total, (VOID **)&buf);
-    if (buf == NULL) { File->Close(File); return EFI_OUT_OF_RESOURCES; }
-
-    readSize = (UINTN)total;
-    st = File->Read(File, &readSize, buf);
-    if (st != EFI_SUCCESS) {
-        BS->FreePool(buf);
-        File->Close(File);
-        return st;
-    }
-
-    File->Close(File);
-    *OutData = buf;
-    *OutSize = (UINT64)readSize;
-    return EFI_SUCCESS;
+/* Generic little-endian readers, used when rebasing the embedded SEC core. */
+static UINT16 ReadU16(const UINT8 *p) {
+    return (UINT16)(p[0] | ((UINT16)p[1] << 8));
 }
-
-static EFI_STATUS LoadFileFromEsp(EFI_FILE_PROTOCOL *Root, const CHAR16 *const *Candidates,
-                                   UINT8 **OutData, UINT64 *OutSize, CHAR16 *OutPath, UINTN OutPathMax)
-{
-    EFI_STATUS st = EFI_NOT_FOUND;
-    UINTN i;
-
-    for (i = 0; Candidates[i] != NULL; i++) {
-        UINT8 *data = NULL;
-        UINT64 size = 0;
-        EFI_STATUS s = ReadEspFile(Root, Candidates[i], &data, &size);
-        if (s == EFI_SUCCESS) {
-            Print("[FS ] loaded '%s', %u bytes\r\n", "(esp file)", (UINT32)size);
-            if (OutPath != NULL) {
-                UINTN n = StrLenW(Candidates[i]);
-                if (n >= OutPathMax) n = OutPathMax - 1;
-                memcpy(OutPath, Candidates[i], n * sizeof(CHAR16));
-                OutPath[n] = 0;
-            }
-            *OutData = data;
-            *OutSize = size;
-            return EFI_SUCCESS;
-        }
-        Print("[FS ] candidate %u not usable, status %u\r\n", (UINT32)i, (UINT32)s);
-    }
-    return st;
-}
-
-static EFI_STATUS LoadPayloadFromEsp(UINT8 **OutData, UINT64 *OutSize, CHAR16 *OutPath, UINTN OutPathMax)
-{
-    EFI_BOOT_SERVICES *BS = gBS;
-    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
-    EFI_FILE_PROTOCOL *root = NULL;
-    EFI_STATUS st;
-
-    st = BS->LocateProtocol((EFI_GUID *)&gEfiSimpleFileSystemProtocolGuid, NULL, (VOID **)&fs);
-    if (st != EFI_SUCCESS || fs == NULL) {
-        Print("[FS ] LocateProtocol(SimpleFileSystem) failed, status %u\r\n", (UINT32)st);
-        return st;
-    }
-
-    st = fs->OpenVolume(fs, &root);
-    if (st != EFI_SUCCESS || root == NULL) {
-        Print("[FS ] OpenVolume failed, status %u\r\n", (UINT32)st);
-        return st;
-    }
-
-    st = LoadFileFromEsp(root, kPayloadCandidates, OutData, OutSize, OutPath, OutPathMax);
-    root->Close(root);
-    return st;
-}
-
-
-/* ------------------------------------------------------------------------- */
-/*  Minimal PE32 (i386) loader                                               */
-/* ------------------------------------------------------------------------- */
-
-#pragma pack(push, 1)
-
-typedef struct {
-    UINT16 e_magic;
-    UINT16 e_cblp, e_cp, e_crlc, e_cparhdr, e_minalloc, e_maxalloc;
-    UINT16 e_ss, e_sp, e_csum, e_ip, e_cs, e_lfarlc, e_ovno;
-    UINT16 e_res[4];
-    UINT16 e_oemid, e_oeminfo;
-    UINT16 e_res2[10];
-    INT32  e_lfanew;
-} PE32_DOS_HEADER;
-
-typedef struct {
-    UINT16 Machine;
-    UINT16 NumberOfSections;
-    UINT32 TimeDateStamp;
-    UINT32 PointerToSymbolTable;
-    UINT32 NumberOfSymbols;
-    UINT16 SizeOfOptionalHeader;
-    UINT16 Characteristics;
-} PE32_FILE_HEADER;
-
-typedef struct {
-    UINT32 VirtualAddress;
-    UINT32 Size;
-} PE32_DATA_DIRECTORY;
-
-typedef struct {
-    UINT16 Magic;
-    UINT8  MajorLinkerVersion, MinorLinkerVersion;
-    UINT32 SizeOfCode, SizeOfInitializedData, SizeOfUninitializedData;
-    UINT32 AddressOfEntryPoint, BaseOfCode, BaseOfData;
-    UINT32 ImageBase, SectionAlignment, FileAlignment;
-    UINT16 MajorOperatingSystemVersion, MinorOperatingSystemVersion;
-    UINT16 MajorImageVersion, MinorImageVersion;
-    UINT16 MajorSubsystemVersion, MinorSubsystemVersion;
-    UINT32 Win32VersionValue, SizeOfImage, SizeOfHeaders, CheckSum;
-    UINT16 Subsystem, DllCharacteristics;
-    UINT32 SizeOfStackReserve, SizeOfStackCommit, SizeOfHeapReserve, SizeOfHeapCommit;
-    UINT32 LoaderFlags, NumberOfRvaAndSizes;
-    PE32_DATA_DIRECTORY DataDirectory[16];
-} PE32_OPTIONAL_HEADER;
-
-typedef struct {
-    UINT32 VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData;
-    UINT32 PointerToRelocations, PointerToLinenumbers;
-    UINT16 NumberOfRelocations, NumberOfLinumbers;
-    UINT32 Characteristics;
-} PE32_SECTION_HEADER;
-
-#pragma pack(pop)
-
-#define PE32_MACHINE_I386   0x014C
-#define PE32_MAGIC          0x010B
-#define PE32_RELOC_HIGHLOW  3
-
-typedef struct {
-    UINT32 ImageBase;      /* actual load address                      */
-    UINT32 EntryPoint;     /* actual entry point (VA)                  */
-    UINT32 ImageSize;
-    UINT32 PreferredBase;
-    UINT32 RelocCount;
-} PE32_IMAGE_INFO;
-
-static UINT16 ReadU16(const UINT8 *p) { return (UINT16)(p[0] | ((UINT16)p[1] << 8)); }
-static UINT32 ReadU32(const UINT8 *p)
-{
-    return (UINT32)p[0] | ((UINT32)p[1] << 8) | ((UINT32)p[2] << 16) | ((UINT32)p[3] << 24);
-}
-
-/*
- * Maps a PE32 image into physical memory below 4 GiB.
- *
- * The image is preferably placed at its preferred base (no relocation needed);
- * if that address is unavailable the image is loaded anywhere below 4 GiB and
- * the IMAGE_REL_BASED_HIGHLOW fixups are applied, so that every absolute
- * reference inside the image points at the new base.
- */
-static EFI_STATUS LoadPe32Image(UINT8 *file, UINT64 fileSize, PE32_IMAGE_INFO *info)
-{
-    EFI_BOOT_SERVICES *BS = gBS;
-    PE32_DOS_HEADER *dos;
-    PE32_FILE_HEADER *fh;
-    PE32_OPTIONAL_HEADER *oh;
-    PE32_SECTION_HEADER *sections;
-    EFI_PHYSICAL_ADDRESS base = 0;
-    UINT8 *image = NULL;
-    UINT32 i, delta, headersSize, imageSize, sectionCount;
-    EFI_STATUS st = EFI_SUCCESS;
-
-    if (fileSize < sizeof(PE32_DOS_HEADER) + 0x40) return EFI_LOAD_ERROR;
-
-    dos = (PE32_DOS_HEADER *)file;
-    if (ReadU16((const UINT8 *)&dos->e_magic) != 0x5A4D /* 'MZ' */) {
-        Print("[PE ] bad DOS signature\r\n");
-        return EFI_LOAD_ERROR;
-    }
-
-    if ((UINT32)dos->e_lfanew + sizeof(UINT32) + sizeof(PE32_FILE_HEADER) > fileSize)
-        return EFI_LOAD_ERROR;
-
-    if (ReadU32(file + (UINT32)dos->e_lfanew) != 0x00004550 /* 'PE\0\0' */) {
-        Print("[PE ] bad PE signature\r\n");
-        return EFI_LOAD_ERROR;
-    }
-
-    fh = (PE32_FILE_HEADER *)(file + (UINT32)dos->e_lfanew + 4);
-    if (ReadU16((const UINT8 *)&fh->Machine) != PE32_MACHINE_I386) {
-        Print("[PE ] not an i386 image (machine 0x%04x)\r\n", ReadU16((const UINT8 *)&fh->Machine));
-        return EFI_LOAD_ERROR;
-    }
-    if (fh->SizeOfOptionalHeader < sizeof(PE32_OPTIONAL_HEADER) - 16 * sizeof(PE32_DATA_DIRECTORY)) {
-        Print("[PE ] optional header too small\r\n");
-        return EFI_LOAD_ERROR;
-    }
-
-    oh = (PE32_OPTIONAL_HEADER *)(file + (UINT32)dos->e_lfanew + 4 + sizeof(PE32_FILE_HEADER));
-    if (ReadU16((const UINT8 *)&oh->Magic) != PE32_MAGIC) {
-        Print("[PE ] not a PE32 image (magic 0x%04x)\r\n", ReadU16((const UINT8 *)&oh->Magic));
-        return EFI_LOAD_ERROR;
-    }
-
-    imageSize   = ReadU32((const UINT8 *)&oh->SizeOfImage);
-    headersSize = ReadU32((const UINT8 *)&oh->SizeOfHeaders);
-    sectionCount = ReadU16((const UINT8 *)&fh->NumberOfSections);
-    info->PreferredBase = ReadU32((const UINT8 *)&oh->ImageBase);
-    info->ImageSize = imageSize;
-
-    if (imageSize == 0 || imageSize > 0x40000000u) {
-        Print("[PE ] implausible SizeOfImage 0x%08x\r\n", imageSize);
-        return EFI_LOAD_ERROR;
-    }
-
-    sections = (PE32_SECTION_HEADER *)((UINT8 *)oh + fh->SizeOfOptionalHeader);
-
-    /* 1. try the preferred base, 2. otherwise anywhere below 4 GiB */
-    {
-        EFI_PHYSICAL_ADDRESS want = (EFI_PHYSICAL_ADDRESS)(info->PreferredBase & ~0xFFFu);
-        if (want != 0 &&
-            BS->AllocatePages(AllocateAddress, EfiBootServicesData,
-                              EFI_SIZE_TO_PAGES(imageSize), &want) == EFI_SUCCESS) {
-            base = want;
-        }
-    }
-    if (base == 0) {
-        base = 0xFFFFFFFFULL; /* AllocateMaxAddress: keep everything below 4 GiB */
-        st = BS->AllocatePages(AllocateMaxAddress, EfiBootServicesData,
-                               EFI_SIZE_TO_PAGES(imageSize), &base);
-        if (st != EFI_SUCCESS) {
-            Print("[PE ] AllocatePages failed, status %u\r\n", (UINT32)st);
-            return EFI_OUT_OF_RESOURCES;
-        }
-    }
-
-    image = (UINT8 *)(UINTN)base;
-    Print("[PE ] image base 0x%08x (preferred 0x%08x), size 0x%08x\r\n",
-          (UINT32)base, info->PreferredBase, imageSize);
-
-    /* 2. headers */
-    if (headersSize > fileSize) headersSize = (UINT32)fileSize;
-    if (headersSize > imageSize) headersSize = imageSize;
-    memcpy(image, file, headersSize);
-
-    /* 3. sections */
-    for (i = 0; i < sectionCount; i++) {
-        PE32_SECTION_HEADER *s = &sections[i];
-        UINT32 va = ReadU32((const UINT8 *)&s->VirtualAddress);
-        UINT32 rawSize = ReadU32((const UINT8 *)&s->SizeOfRawData);
-        UINT32 rawPtr = ReadU32((const UINT8 *)&s->PointerToRawData);
-
-        if (va == 0 || rawSize == 0) continue;
-        if ((UINT64)rawPtr + rawSize > fileSize) {
-            Print("[PE ] section %u truncated in file\r\n", i);
-            return EFI_LOAD_ERROR;
-        }
-        if ((UINT64)va + rawSize > imageSize) {
-            Print("[PE ] section %u outside of SizeOfImage\r\n", i);
-            return EFI_LOAD_ERROR;
-        }
-        memcpy(image + va, file + rawPtr, rawSize);
-    }
-
-    /* 4. base relocations */
-    delta = (UINT32)base - info->PreferredBase;
-    info->RelocCount = 0;
-    if (delta != 0 && oh->NumberOfRvaAndSizes > 5) {
-        PE32_DATA_DIRECTORY *dir = &oh->DataDirectory[5]; /* BASE RELOCATION */
-        UINT32 relocRva = ReadU32((const UINT8 *)&dir->VirtualAddress);
-        UINT32 relocSize = ReadU32((const UINT8 *)&dir->Size);
-        UINT32 off = 0;
-
-        while (off + 8 <= relocSize) {
-            UINT32 blockRva  = ReadU32(image + relocRva + off);
-            UINT32 blockSize = ReadU32(image + relocRva + off + 4);
-            UINT32 n, count;
-
-            if (blockSize < 8 || off + blockSize > relocSize) break;
-
-            count = (blockSize - 8) / 2;
-            for (n = 0; n < count; n++) {
-                UINT16 e = ReadU16(image + relocRva + off + 8 + n * 2);
-                UINT16 type = (UINT16)(e >> 12);
-                UINT16 roff = (UINT16)(e & 0x0FFF);
-
-                if (type == PE32_RELOC_HIGHLOW) {
-                    UINT32 target = blockRva + roff;
-                    UINT32 value;
-                    if ((UINT64)target + 4 > imageSize) continue;
-                    value = ReadU32(image + target);
-                    value += delta;
-                    image[target + 0] = (UINT8)(value & 0xFF);
-                    image[target + 1] = (UINT8)((value >> 8) & 0xFF);
-                    image[target + 2] = (UINT8)((value >> 16) & 0xFF);
-                    image[target + 3] = (UINT8)((value >> 24) & 0xFF);
-                    info->RelocCount++;
-                }
-            }
-            off += blockSize;
-        }
-    }
-
-    info->ImageBase = (UINT32)base;
-    info->EntryPoint = (UINT32)base + ReadU32((const UINT8 *)&oh->AddressOfEntryPoint);
-
-    Print("[PE ] %u sections, delta 0x%08x, %u relocations applied\r\n",
-          sectionCount, delta, info->RelocCount);
-    Print("[PE ] entry point 0x%08x\r\n", info->EntryPoint);
-    return EFI_SUCCESS;
+static UINT32 ReadU32(const UINT8 *p) {
+    return (UINT32)p[0] | ((UINT32)p[1] << 8) |
+           ((UINT32)p[2] << 16) | ((UINT32)p[3] << 24);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1312,9 +964,9 @@ static EFI_STATUS LoadPe32Image(UINT8 *file, UINT64 fileSize, PE32_IMAGE_INFO *i
 #pragma pack(push, 1)
 typedef struct {
     UINT32 Magic;          /* 'B32P'                                    */
-    UINT32 ImageBase;
-    UINT32 EntryPoint;
-    UINT32 ImageSize;
+    UINT32 Reserved0;      /* legacy raw-PE fields, now unused           */
+    UINT32 Reserved1;
+    UINT32 Reserved2;
     UINT32 StackTop;
     UINT32 GdtSlot;
     UINT32 Trampoline;
@@ -1435,65 +1087,9 @@ static void RelocateSecModule(UINT8 *Image, UINTN SecOffset)
     Print("[FV ] SEC core rebased by 0x%08x\r\n", (UINT64)(UINT32)delta);
 }
 
-/*
- * Remove a file from the EFI system partition.
- *
- * The 32 bit firmware that is hosted below scans /EFI/BOOT for its boot
- * option.  Our own 64 bit loader lives there as well and the 32 bit firmware
- * would try to execute it, so it is deleted before the hand-off.
- */
-static EFI_STATUS DeleteEspFile(const CHAR16 *Path)
-{
-    EFI_BOOT_SERVICES *BS = gBS;
-    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
-    EFI_FILE_PROTOCOL *root = NULL;
-    EFI_FILE_PROTOCOL *file = NULL;
-    EFI_FILE_INFO *info = NULL;
-    UINTN infoSize = sizeof(EFI_FILE_INFO);
-    EFI_STATUS st;
-
-    st = BS->LocateProtocol((EFI_GUID *)&gEfiSimpleFileSystemProtocolGuid, NULL, (VOID **)&fs);
-    Print("[FS ] LocateProtocol status=%u fs=0x%016x\\r\\n", (UINT32)st, (UINT64)(UINTN)fs);
-    if (st != EFI_SUCCESS) return st;
-    if (fs == NULL) { Print("[FS ] fs is NULL\\r\\n"); return EFI_NOT_FOUND; }
-    Print("[FS ] fs->Revision=0x%016x fs->OpenVolume=0x%016x\\r\\n",
-          fs->Revision, (UINT64)(UINTN)fs->OpenVolume);
-
-    st = fs->OpenVolume(fs, &root);
-    Print("[FS ] OpenVolume status=%u root=0x%016x\\r\\n", (UINT32)st, (UINT64)(UINTN)root);
-    if (st != EFI_SUCCESS) return st;
-    Print("[FS ] root->Revision=0x%016x root->Open=0x%016x root->Close=0x%016x\\r\\n",
-          root->Revision, (UINT64)(UINTN)root->Open, (UINT64)(UINTN)root->Close);
-    Print("[FS ] signature at root-8 = 0x%08x (expect 0x%08x)\\r\\n",
-          *(UINT32 *)((UINT8 *)root - 8), 0x69746166);
-    Print("[FS ] OFile at root+0x88 = 0x%016x\\r\\n",
-          *(UINT64 *)((UINT8 *)root + 0x88));
-    Print("[FS ] Volume at OFile+0 = 0x%016x\\r\\n",
-          *(UINT64 *)*(UINT64 *)((UINT8 *)root + 0x88));
-
-    /* test: try opening BCD instead */
-    st = root->Open(root, &file, L"\\\\EFI\\\\BOOT\\\\BCD", EFI_FILE_MODE_READ, 0);
-    if (st != EFI_SUCCESS) {
-        root->Close(root);
-        return st;
-    }
-
-    /* the FAT driver wants the file size to be zero before the delete */
-    info = (EFI_FILE_INFO *)BS->AllocatePool(EfiBootServicesData, infoSize, (VOID **)&info);
-    if (info != NULL) {
-        st = file->GetInfo(file, (EFI_GUID *)&gEfiFileInfoGuid, &infoSize, info);
-        if (st == EFI_SUCCESS) {
-            info->FileSize = 0;
-            st = file->SetInfo(file, (EFI_GUID *)&gEfiFileInfoGuid, &infoSize, info);
-        }
-        BS->FreePool(info);
-    }
-
-    if (st == EFI_SUCCESS) st = file->Delete(file);
-    file->Close(file);
-    root->Close(root);
-    return st;
-}
+/* The loader no longer removes or truncates any file belonging to the OS.
+ * Re-entry is guarded by the inner firmware's own boot flow; an ESP is
+ * treated as read-only from this point of view. */
 
 /*
  * Prepare the hosted 32 bit firmware:
@@ -1630,11 +1226,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     EFI_STATUS st;
     EFI_MEMORY_DESCRIPTOR *map = NULL;
     UINTN mapSize = 0, descSize = 0, mapKey = 0;
-    UINT8 *file = NULL;
-    UINT64 fileSize = 0;
     UINT32 entry = 0;
-    CHAR16 chosen[64];
-    PE32_IMAGE_INFO pe;
     EFI_PHYSICAL_ADDRESS handoverPage = 0, stackTop = 0;
     BOOT32_HANDOVER *handover;
     UINTN trampolineSize;
@@ -1642,6 +1234,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     UefiInit(SystemTable);
     if (gBS == NULL) return EFI_UNSUPPORTED;
     /* boot services table verified: 45 members (UEFI 2.8 layout with Reserved slot) */
+
+    /* --- platform detection -----------------------------------------------
+     * One correct read of PCI config space, done once.  The old code compared
+     * the raw dword against 0x80867190 (byte-swapped) and then tried to write
+     * the read-only DID via port 0x0CFA.  See ../shared/platform_quirks.h.
+     * VID is the low word, DID the high word of the 0xCFC dword. */
+    gPlatform = pq_platform_detect();
+    Print("[UEFI] platform %s\r\n", gPlatform.name);
+    Print("[UEFI] host bridge %04x:%04x (cfg dword %08x)\r\n",
+          (UINT64)gPlatform.vid, (UINT64)gPlatform.did, (UINT64)gPlatform.raw);
+    if (gPlatform.pm_present) {
+        Print("[UEFI] ACPI PM device 00:%02x.%x class %04x style %u\r\n",
+              (UINT64)gPlatform.pm_dev, (UINT64)gPlatform.pm_fn,
+              (UINT64)gPlatform.pm_class, (UINT64)gPlatform.pm_style);
+    } else {
+        Print("[UEFI] WARNING: no ACPI PM device (class 0680/0601) found\r\n");
+    }
+    if (gPlatform.generic_fallback) {
+        Print("[UEFI] host bridge has no dedicated OVMF path; using the generic\r\n");
+        Print("[UEFI] fallback in the single universal firmware build\r\n");
+    }
 
 
     /* --- 1. memory map ---------------------------------------------------- */
@@ -1684,7 +1297,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     /* --- 2. target ------------------------------------------------------- */
     Print("[UEFI] preparing the hand-off\r\n");
-    chosen[0] = 0;
     entry = 0;
 
     /*
@@ -1721,97 +1333,34 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     TransitionHandover32         = handoverPage + HANDOVER_INFO_OFFSET;
 
     /*
-     * Mode A: the 32 bit EDK2 firmware that is linked into this application
-     *         is started as a payload of the 64 bit application.  This is
-     *         the arrangement a CSM uses to host a legacy BIOS: the 64 bit
-     *         firmware prepares the environment and hands the CPU over to
-     *         the 32 bit firmware, which then boots on its own and starts
-     *         the 32 bit Windows environment.
-     *
-     * Mode B: a plain 32 bit Windows PE image is loaded and entered.
+     * Single, OS-neutral path: host the 32-bit inner firmware.  Its BDS
+     * enumerates the ESP and any other boot device exactly as a normal UEFI
+     * implementation would, so any 32-bit EFI OS can be started.  No file on
+     * the ESP is named, deleted or rewritten by this loader.
      */
     {
         UINT32 fvBase = 0;
         UINT64 stackTop32 = 0;
         (void)map; (void)mapSize; (void)descSize;
 
-        /*
-         * If the ESP carries a 32 bit PE image it is used directly, otherwise
-         * the hosted 32 bit firmware is started.
-         */
-        st = EFI_NOT_FOUND;
-        if (LoadPayloadFromEsp(&file, &fileSize, chosen, sizeof(chosen) / sizeof(chosen[0])) == EFI_SUCCESS) {
-            memset(&pe, 0, sizeof(pe));
-            if (LoadPe32Image(file, fileSize, &pe) == EFI_SUCCESS) {
-                handover->ImageBase   = pe.ImageBase;
-                handover->EntryPoint  = pe.EntryPoint;
-                handover->ImageSize   = pe.ImageSize;
-                TransitionBootArg32 = (UINT64)(UINTN)handover;
-                TransitionStackTop32 = stackTop;
-                entry = pe.EntryPoint;
-                st = EFI_SUCCESS;
-                Print("[UEFI] 32 bit PE at 0x%08x, entry 0x%08x\r\n", pe.ImageBase, pe.EntryPoint);
-            }
-            gBS->FreePool(file);
+        Print("[UEFI] hosting OVMF32 on %s (host bridge DID %04x)\r\n",
+              gPlatform.name, (UINT64)gPlatform.did);
+        st = PrepareHostedFirmware(map, mapSize, descSize, &entry, &fvBase, &stackTop32);
+        if (st != EFI_SUCCESS || fvBase == 0) {
+            Print("[UEFI] hosted firmware setup failed, status %u\r\n", (UINT32)st);
+            gBS->FreePool(map);
+            return (st != EFI_SUCCESS) ? st : EFI_NOT_FOUND;
         }
 
-        if (st != EFI_SUCCESS) {
-            /* Detect the host bridge before handoff so the log explains which
-     * platform/environment we're running under (efi32boot validated under QEMU
-     * TCG/KVM; VMware reports 0x8086:0x7190, real hardware varies). */
-    {
-        UINT32 addr = 0x80000000u;
-        UINT32 val;
-        __asm__ volatile("outl %0, %1" : : "a"(addr), "Nd"((UINT16)0x0CF8) : "memory");
-        __asm__ volatile("inl  %1, %0" : "=a"(val) : "Nd"((UINT16)0x0CFC) : "memory");
-        Print("[UEFI] Host bridge PCI ID = 0x%08x (target: QEMU = 0x8086:?; VMware = 0x8086:0x7190)\\r\\n", val);
+        /* the SEC core expects the firmware volume pointer in EBP */
+        TransitionBootArg32 = fvBase;
+        TransitionStackTop32 = stackTop32;
+
+        Print("[UEFI] starting the hosted 32 bit firmware\r\n");
+        Print("[UEFI] firmware volume 0x%08x, SEC entry 0x%08x\r\n", fvBase, entry);
     }
 
-    st = PrepareHostedFirmware(map, mapSize, descSize, &entry, &fvBase, &stackTop32);
-        }
-        if (st == EFI_SUCCESS && fvBase != 0) {
-            /* the SEC core expects the firmware volume pointer in EBP */
-            TransitionBootArg32 = fvBase;
-            TransitionStackTop32 = stackTop32;
-
-            Print("[UEFI] starting the hosted 32 bit firmware\r\n");
-            Print("[UEFI] firmware volume 0x%08x, SEC entry 0x%08x\r\n", fvBase, entry);
-        } else {
-            /* Mode B: a 32 bit PE image from the ESP */
-            st = LoadPayloadFromEsp(&file, &fileSize, chosen, sizeof(chosen) / sizeof(chosen[0]));
-            if (st != EFI_SUCCESS) {
-                Print("[UEFI] no 32 bit target available, status %u\r\n", (UINT32)st);
-                gBS->FreePool(map);
-                return EFI_NOT_FOUND;
-            }
-
-            memset(&pe, 0, sizeof(pe));
-            st = LoadPe32Image(file, fileSize, &pe);
-            gBS->FreePool(file);
-            if (st != EFI_SUCCESS) {
-                Print("[UEFI] PE32 load failed, status %u\r\n", (UINT32)st);
-                gBS->FreePool(map);
-                return st;
-            }
-
-            handover->ImageBase   = pe.ImageBase;
-            handover->EntryPoint  = pe.EntryPoint;
-            handover->ImageSize   = pe.ImageSize;
-
-            TransitionBootArg32 = (UINT64)(UINTN)handover;
-            TransitionStackTop32 = stackTop;
-            entry = pe.EntryPoint;
-
-            Print("[HND] 32 bit PE at 0x%08x, entry 0x%08x\r\n", pe.ImageBase, pe.EntryPoint);
-        }
-    }
-
-    /*
-     * The hosted 32 bit firmware builds its boot options from /EFI/BOOT and
-     * would pick our own 64 bit loader.  Remove it so that the 32 bit
-     * firmware boots the 32 bit Windows boot manager instead.
-     */
-    /* deletion already done earlier, before PrepareHostedFirmware */
+    /* The inner firmware picks its own boot option.  The ESP is left intact. */
 
     /* --- 4. leave UEFI ---------------------------------------------------- */
     /*
@@ -1819,19 +1368,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
      * been issued, so from here on only the serial port is used.
      */
     gConsoleDead = TRUE;
-    {
-        UINT32 hbaddr = 0x80000000u;
-        UINT32 hbdev;
-        __asm__ volatile("outl %0, %1" : : "a"(hbaddr), "Nd"((UINT16)0x0CF8) : "memory");
-        __asm__ volatile("inl  %1, %0" : "=a"(hbdev) : "Nd"((UINT16)0x0CFC) : "memory");
-        Print("[UEFI] Host bridge PCI ID = 0x%08x (QEMU=0x8086:* ; VMware=0x8086:0x7190)\r\n", hbdev);
-        if (hbdev == 0x80867190u) {
-            UINT32 cfg = 0x80000002u;
-            __asm__ volatile("outl %0, %1" : : "a"(cfg), "Nd"((UINT16)0x0CF8) : "memory");
-            __asm__ volatile("outw %0, %1" : : "a"((UINT16)0x1237), "Nd"((UINT16)0x0CFA) : "memory");
-            Print("[UEFI] VMware host bridge - temp override DID 0x7190 -> 0x1237 for OVMF32 Piix4 path\r\n");
-        }
-    }
+    /* Last legal hardware quirk before boot services go away: make sure ACPI
+     * PM I/O space is enabled on the PM device we actually found (00:01.3
+     * i440FX, 00:07.3 VMware 440BX, 00:1F.0 Q35/ICH7).  The old code tried
+     * to spoof VID/DID here; that register is read-only, the compare was
+     * byte-swapped and the port was wrong, so it never did anything.
+     * Nothing is written when the host firmware already enabled PM I/O. */
+    if (pq_enable_pm_io(&gPlatform))
+        Print("[UEFI] ACPI PM I/O space enabled on probed PM device\r\n");
     Print("[UEFI] requesting ExitBootServices\r\n");
     gBS->FreePool(map);
     st = ExitBootServices(ImageHandle);

@@ -1,185 +1,190 @@
 # efi32boot
 
-A research UEFI loader for 64-bit x86_64 firmware that transitions the CPU into
-32-bit protected mode and hosts a 32-bit OVMF firmware runtime.
+**Your firmware is 64-bit. Your operating system only speaks 32-bit UEFI. This
+is the bridge between them.**
 
-This project was developed and tested inside QEMU. It is not production-safe.
+Some machines shipped with 64-bit-only UEFI and no Compatibility Support
+Module. They simply cannot start a 32-bit EFI bootloader — which is awkward if
+the OS you need is 32-bit. `efi32boot` fixes that by carrying a complete
+32-bit OVMF firmware inside an ordinary 64-bit EFI application.
 
-## Goal
+It does not emulate a CPU. It drops the processor out of long mode, into
+32-bit protected mode, and hands control to a real IA32 firmware. That
+firmware then boots whatever 32-bit EFI OS you give it, exactly as it would
+on native hardware.
 
-Provide a 64-bit UEFI application that can boot a 32-bit UEFI payload on a
-64-bit UEFI-only machine. The hosted 32-bit firmware runtime is OVMF/EDK2
-IA32, embedded into the boot application.
+> This is a research prototype, built with a lot of AI assistance and a lot of
+> human debugging. It is not production software. Please read the safety note
+> before pointing it at anything you care about.
 
-Proven so far:
+## How it works
 
-- 64-bit UEFI to 32-bit protected-mode transition
-- hosted OVMF32 runtime startup
-- 32-bit GRUB reaches an interactive prompt
-- 32-bit Windows media begin loading on QEMU with a rebuilt protected-policy
-  firmware build
-
-## Files
-
-- `main.c` — UEFI bootstrap, memory allocation, compatibility-mode hand-off
-- `transition.asm` — GDT, CR0/paging teardown, compatibility-mode jump
-- `main.c` relocation logic for the embedded 32-bit firmware
-- `tools/gen_ovmf32.py` — extracts EDK2/OVMF constants from a built firmware
-  image
-- `OVMF32*.fd` - The file that the program loads to execute 32bit code
-- `Makefile` — freestanding UEFI application build
-
-## Build
-
-Install the rootless toolchain first:
-
-```bash
-./setup_toolchain.sh /tmp/opencode/tc
-export PATH=/tmp/opencode/tc/usr/bin:$PATH
+```
+64-bit host firmware
+    └── BOOTX64.EFI  (this project)
+            ├── copies the embedded OVMF32 image below 4 GiB
+            ├── rebases its SEC core, reserves the MEMFD region
+            ├── leaves long mode -> compatibility mode -> 32-bit protected mode
+            └── jumps into OVMF32 SEC
+                    └── PEI -> DXE -> BDS -> any 32-bit EFI OS
 ```
 
-Obtain a 32-bit DEBUG OVMF image separately, for example with:
+The loader deliberately knows nothing about operating systems. It does not
+look for `boot.wim`, `bootmgfw.efi`, `BCD` or any other named file, it does
+not rewrite `BootOrder`, and it does not delete anything belonging to your OS.
+Boot policy belongs to the inner firmware, which means the same binary works
+for Linux, BSD, Windows or anything else that can boot as a 32-bit EFI image.
+
+The platform layer is generic too: host-bridge IDs are only printed in the
+log, and the ACPI power-management device is found by PCI class code from any
+vendor. One build works on QEMU i440FX, Q35, VMware, and chipsets that do not
+have a name yet. There is no "VMware edition".
+
+## What's in here
+
+| file | what it does |
+| --- | --- |
+| `main.c` | UEFI bootstrap, memory map, firmware relocation, mode hand-off |
+| `transition.asm` | GDT, CR0/paging teardown, the 32-bit jump |
+| `ovmf32_blob.S` | embeds `OVMF32.fd` into the EFI application |
+| `tools/gen_ovmf32.py` | reads SEC offsets out of a firmware image |
+| `build/ovmf32_constants.h` | generated from the shipped `OVMF32.fd` |
+| `shared/` | platform-neutral quirks + the EDK2 patch/rebuild tooling |
+| `edk2/` | git submodule: the patched [EDK2 fork](https://github.com/devtinoimao/edk2/tree/hosted-firmware) |
+| `make_esp.sh` | builds a generic ESP containing just the loader |
+| `test_qemu.sh` | OS-neutral smoke test — no OS files needed |
+
+## Status
+
+| environment | result |
+| --- | --- |
+| QEMU 10.2.2 `-M pc`, `-m 2048` | hand-off → SEC → PEI → DXE → BDS, no asserts |
+| QEMU 10.2.2 `-M q35`, `-m 2048` | same; PM device found at `00:1F.0` by class `06:01` |
+| VMware Workstation 26.0.1 | **passes.** `8086:7190`, PM at `00:07.3`, generic fallback, full chain to BDS, zero asserts |
+| Forced unknown DID (`8086:DEAD`) | passes — proves nothing is keyed to a chipset |
+| Real hardware, early Intel Macs | not validated end-to-end; detection and diagnostics only |
+
+The original VMware failure was
+`AcpiTimerLibConstructor: Unknown Host Bridge Device ID: 0x7190` followed by
+an ASSERT in SEC. That was fixed in the firmware source, not papered over in
+the loader: VID/DID are read-only PCI config registers, so no bootloader can
+spoof them. A real VMware serial log is kept at `vmware_universal_test.log`.
+
+## Build it
+
+You need Python 3, `make`, a MinGW-w64 cross toolchain and NASM. The repo
+ships a helper that installs a private toolchain so you don't have to touch
+system packages:
 
 ```bash
-build -p OvmfPkg/OvmfPkgIa32.dsc -a IA32 -b DEBUG -t GCC
+git clone --recurse-submodules https://github.com/devtinoimao/efi32boot.git
+cd efi32boot
+
+./setup_toolchain.sh ./toolchain
+export PATH="$PWD/toolchain/usr/bin:$PATH"
+
+make all                 # -> BOOTX64.EFI
 ```
 
-Then extract constants:
+`OVMF32.fd` is included, so you do **not** need to build EDK2 just to compile
+the loader. The submodule is only needed if you want to rebuild the firmware
+yourself.
+
+### Rebuilding the embedded firmware
+
+The `edk2` submodule points at branch `hosted-firmware` of
+`devtinoimao/edk2`. It contains a platform-neutral OVMF plus the local build
+settings (IA32 MEMFD at `0x40000000`, KVM host-CPU MSR fix). If you cloned
+without `--recurse-submodules`:
 
 ```bash
-python3 tools/gen_ovmf32.py /path/to/OVMF.fd build/ovmf32_constants.h
+git submodule update --init --depth 1 edk2
 ```
 
-Build:
+The build runs inside the `localhost/edk2-builder:bookworm` podman image
+(GCC 12, NASM, iasl, EDK2 BaseTools). From the combined workspace:
 
 ```bash
-make TOOLCHAIN_PREFIX=/tmp/opencode/tc/usr/bin/ all
+bash shared/rebuild_ovmf.sh
 ```
 
-## QEMU test
+That rebuilds the IA32 firmware, regenerates `build/ovmf32_constants.h` and
+relinks the loader. If you'd rather apply the change by hand,
+`shared/patch_ovmf_platform.py` is idempotent and
+`shared/patches/ovmf-platform-portability.patch` is a plain `git apply`-able
+diff. `efi64boot` uses the same fork at a different MEMFD base.
 
-Create an MBR-partitioned ESP containing:
+## Test it
 
-- `/EFI/BOOT/BOOTX64.EFI` — the built loader
-- optionally `BOOTIA32.EFI` or GRUB
-- attach the desired ISO via `-cdrom`
-
-Example disk-only hosted firmware test:
+The smoke test needs no OS at all — it just proves the hand-off works:
 
 ```bash
-qemu-system-x86_64 -cpu qemu64 -m 2048 -smp 2 -nographic \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
-  -drive if=pflash,format=raw,file=vars/OVMF_VARS.fd \
-  -drive format=raw,file=esp.img \
-  -cdrom tiny10.iso
+./test_qemu.sh -M pc          # or -M q35
 ```
 
-KVM with the real host CPU model is supported and verified
-(`-accel kvm -cpu host` boots Windows Setup); it requires the OVMF32
+### Booting a real OS from an ISO you supply
+
+No OS media is shipped with this repository. Bring your own ISO — a 32-bit
+WinPE image is a perfectly good example, and so is a 32-bit Linux or BSD
+installer. Build a plain ESP with the loader on it, then attach the ISO:
+
+```bash
+ISO=/path/to/your/winpe-x86.iso        # you provide this file
+
+./make_esp.sh                          # -> build/esp.img
+cp /usr/share/edk2/ovmf/OVMF_VARS.fd build/OVMF_VARS.fd
+
+qemu-system-x86_64 -accel tcg -cpu qemu64 -M pc -m 2048 -smp 2 \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd \
+  -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
+  -drive format=raw,file=build/esp.img \
+  -cdrom "$ISO" \
+  -serial file:build/serial.log -display gtk -no-reboot
+```
+
+`./make_esp.sh <OS_TREE_DIR>` can also mirror an arbitrary EFI directory tree
+onto the ESP if you'd rather boot from disk. Nothing in the ESP layout is
+Windows-specific.
+
+KVM works too (`-accel kvm -cpu host`), but the hosted OVMF32 needs the
 FeatureControl MSR fix described in `docs/KVM_HOST_CPU.md`.
-
-## Related projects and prior art
-
-This project does not claim that the idea started here. Related prior concepts and
-research include:
-
-- EDK2 / Tianocore, especially `OvmfPkg` and the UEFI firmware architecture
-  (source of the hosted 32-bit firmware environment)
-- GRUB, `grub_cpu=i386` / `grub_platform=efi`
-- Intel MultiArchUefiPkg, which runs non-native UEFI binaries with a CPU emulator
-- CSMWrap, a standalone SeaBIOS/CSM wrapper project
-- SeaBIOS in the CSM path
-- Tianocore UEFI boot specification documentation
-- QEMU-OVMF virtual hardware as the primary test environment
-
-The implementation here is a compatibility-mode host attempt rather than a
-software emulator or a legacy CSM.
 
 ## Demo
 
-A QEMU demonstration of the hosted 32-bit firmware chain:
+The GIF and MP4 in `media/` show the whole chain starting up. They use a
+32-bit Windows setup disc as the *example guest* — that is a test subject,
+not a dependency.
 
-![efi32boot QEMU demo — hosted 32-bit firmware booting 32-bit Windows media](media/efi32boot_qemu_demo.gif)
+![efi32boot QEMU demo](media/efi32boot_qemu_demo.gif)
 
-The full MP4 (with sound-free smooth motion) is here:
-[`media/efi32boot_qemu_demo.mp4`](media/efi32boot_qemu_demo.mp4).
+Full video: [`media/efi32boot_qemu_demo.mp4`](media/efi32boot_qemu_demo.mp4)
 
-The video shows the 64-bit UEFI loader, hosted OVMF32 startup, 32-bit Windows
-media (Tiny10) reaching Setup, and the GRUBFM fallback disc. It is provided as
-research evidence, not as a production safety guarantee.
+## Be careful
 
-Known limitation seen in the demo: GRUBFM can start under the hosted firmware,
-but booting WIM-based media through it is currently bugged. Tiny10's own boot
-manager is the reliable path.
+- Do not install this as the primary bootloader on a machine you rely on.
+- The mode switch depends on the host firmware's memory map; a bad map can
+  hang before any output. Always capture the serial log.
+- No Secure Boot guarantees.
+- CSM enabled may send you down a legacy BIOS path and never reach UEFI at
+  all. Test with CSM off first.
+- If something fails, attach the serial log to the issue. That is genuinely
+  the most useful thing you can send.
 
-A prebuilt `OVMF32.fd` (the patched 32-bit firmware image embedded by the
-loader, with the FeatureControl MSR fix and image-protection policy disabled)
-is included in this repository so the loader can be built without rebuilding
-EDK2. Rebuild instructions are in `docs/KVM_HOST_CPU.md`.
+## Credits and licensing
 
+Our code is **MIT licensed** — see `LICENSE`. The embedded `OVMF32.fd` is
+derived from TianoCore EDK2, which is **BSD-2-Clause-Patent**; upstream
+copyright and license notices remain in force for that work. The EDK2 fork
+is referenced as a submodule rather than vendored, precisely so its
+provenance stays clear. See `NOTICE` for the third-party breakdown.
 
-## AI-assisted development
+Prior art worth reading: TianoCore OVMF, GRUB's `i386-efi` target, Intel
+MultiArchUefiPkg (emulation-based), CSMWrap and SeaBIOS (CSM-based). This
+project is a compatibility-mode host, not an emulator and not a legacy CSM.
 
-This project is a heavily AI-assisted research prototype.
+No Windows ISOs, firmware blobs you downloaded yourself, or generated disk
+images are distributed here. Get those separately, under their own licenses.
 
-And the best part: AI made this — and the human side spent hours constraining
-it, testing it, debugging real firmware failures, and proving what actually works
-in QEMU.
-
-Nope, it is not a pure “vibe code” dump. The tested behavior, recovery steps,
-and limitations are documented.
-
-
-## Safety warning
-
-This project is experimental.
-
-- Do not use it on a primary or production computer.
-- Do not install it as the primary bootloader on real hardware.
-- The II32 runtime and memory layout depend on the host firmware and memory
-  map.
-- A malformed deployment can prevent boot and may require recovery.
-- No Secure Boot safety guarantees are currently provided.
-
-## License
-
-MIT License. See `LICENSE`.
-
-## Prior note
-
-This repository does not include Windows ISOs, firmware binaries purchased or
-downloaded by the user, or generated disk images. Obtain these separately in
-compliance with their respective licenses.
-
-## Supported environments
-
-Validated: **QEMU TCG and KVM** (i440fx/q35), CPUs `qemu64` and `core2duo`.
-The hosted `OVMF*.fd` assumes QEMU's PCI host bridge (control word 0x80000000
-+ PCI ID `0x8086:...`).
-
-- **VMware** reports PCI host bridge `0x8086:0x7190` (Intel 440BX). The hosted
-  firmware's `AcpiTimerLib` rejects it with `Unknown Host Bridge Device ID` →
-  ASSERT in `SecMain`. Use a VMware-aware OVMF build or run under QEMU.
-- **Real hardware (i5-4570 and similar):** not yet exercised. The handoff
-  logs the host-bridge PCI ID at boot (`[UEFI] Host bridge PCI ID = 0x...`)
-  so unsupported controllers fail loudly instead of silently resetting.
-  With CSM enabled the system may boot via legacy BIOS and never reach UEFI at
-  all — test with CSM disabled and UEFI-only first. Please attach the serial
-  log of the failed run to bug reports.
-
-## Building for VMware / real hardware
-
-The shipped `OVMF32.fd` and `OvmfPkgIa32` assume QEMU (host bridge
-0x8086:*); under VMware the inner AcpiTimerLib rejects host bridge 0x7190
-with `ASSERT`. To target VMware (or other host bridges), apply
-`patches/acpitimer-vmware-0x7190.patch` to edk2-stable and rebuild
-`OvmfPkgIa32`:
-
-    cd edk2-stable
-    patch -p1 < ../efi32boot/patches/acpitimer-vmware-0x7190.patch
-    source edksetup.sh BaseTools
-    build -a IA32 -t GCC5 -p OvmfPkg/OvmfPkgIa32.dsc -D SECURE_BOOT_ENABLE=TRUE
-
-Then copy the resulting `OVMF*.fd` over `efi32boot/OVMF32.fd` and re-run
-`make`. Real hardware with CSM enabled may additionally boot via legacy
-BIOS — test `CSM off` + UEFI-only mode first.
+This project was heavily AI-assisted; the tested behaviour, the recovery
+steps and the limitations above came from real debugging sessions on QEMU and
+VMware. It is not a vibe-code dump, but it is still experimental firmware.
