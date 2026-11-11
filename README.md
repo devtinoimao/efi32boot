@@ -146,6 +146,13 @@ qemu-system-x86_64 -accel tcg -cpu qemu64 -M pc -m 2048 -smp 2 \
 onto the ESP if you'd rather boot from disk. Nothing in the ESP layout is
 Windows-specific.
 
+One thing that looks like a failure but isn't: installer ISOs often show
+"Press any key to boot from CD or DVD". In a headless run there is nobody to
+press it, so BDS reports `failed to start Boot0001 ...: Time out` and drops to
+the EFI Shell. The inner firmware did find and launch the ISO's
+`\EFI\BOOT\BOOTIA32.EFI` — that line is in the log. Use `-display gtk` and hit
+a key if you want to continue into the installer.
+
 KVM works too (`-accel kvm -cpu host`), but the hosted OVMF32 needs the
 FeatureControl MSR fix described in `docs/KVM_HOST_CPU.md`.
 
