@@ -113,7 +113,7 @@ $(OVMF32_GEN): tools/gen_ovmf32.py $(OVMF32) | $(BUILDDIR)
 $(OVMF32_OBJ): ovmf32_blob.S $(OVMF32) | $(BUILDDIR)
 	$(CC) -m64 -c -I. -o $@ ovmf32_blob.S
 
-$(BUILDDIR)/main.o: main.c $(OVMF32_GEN) ../shared/platform_quirks.h | $(BUILDDIR)
+$(BUILDDIR)/main.o: main.c $(OVMF32_GEN) shared/platform_quirks.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILDDIR)/transition.o: transition.asm | $(BUILDDIR)
