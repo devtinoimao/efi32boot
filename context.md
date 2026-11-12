@@ -226,3 +226,16 @@ inner BDS/Shell with no ASSERT. PM found as `00:01.3 class 0680` on pc and
   ./build paths removed, ISO-based QEMU test commands documented
   (user supplies the ISO), proper compile instructions added.
 - QEMU pc/q35 (and 12 GiB for efi64boot) re-validated after the cleanup.
+
+## 2026-11-12 -- repo moved to the HDD
+
+- Repo now lives at
+  /run/media/abokaborda/HDD Data/Default Project/efi32boot/
+  (old ~/Documents/Default Project/efi32boot is gone). The "HDD Data" path
+  contains a space -- always quote it. The drive is NTFS mounted via
+  fuseblk by udisks2; if the path is missing, re-attach/mount the drive.
+- NTFS reports every file as 100755, which made git show ~33 fake modified
+  entries (mode-only). Fixed with `git config core.fileMode false`; status
+  is clean. Do not commit mode changes.
+- HEAD cef5514 (pushed). Binaries intact: BOOTX64.EFI 4,214,009 B,
+  OVMF32.fd 4,194,304 B, vmware_universal_test.log 88,564 B.
